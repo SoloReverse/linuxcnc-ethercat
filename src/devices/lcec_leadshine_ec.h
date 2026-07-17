@@ -111,6 +111,7 @@ typedef enum {
   MODULE_AIN,      // analog input
   MODULE_AOUT,     // analog output
   MODULE_ENCODER,  // encoder
+  MODULE_SERIAL,   // multi-port serial (RS-485) mailbox-over-PDO
 } leadshine_ec_modkind_t;
 
 /// @brief Static description of a supported module type.
@@ -129,6 +130,50 @@ typedef struct {
   const lcec_modparam_desc_t *modparams;  // modparams supported by this module type
 } leadshine_ec_module_def_t;
 
+// Serial (R3-RS02-485) module geometry.  Each serial module hosts two RS-485
+// ports; within a slot's 0x10 CoE window port p (0/1) is offset by p*4 objects.
+// Each port exposes 11 data words (22 bytes) plus the control/status header.
+#define LEADSHINE_EC_SER_PORTS      2   // RS-485 ports per serial module
+#define LEADSHINE_EC_SER_DATA_WORDS 11  // DataOut0..10 / DataIn0..10 per port
+#define LEADSHINE_EC_SER_PORT_INCR  4   // CoE object offset between ports
+
+/// @brief Runtime state for one RS-485 port of a serial module.
+///
+/// All values are 16-bit (UINT / ARRAY[0..1] OF BYTE per the ESI).  The
+/// control/output pins (`ctrl_word` .. `out`) are HAL_IN — userspace drives
+/// them and we copy them to the process image in `_write`.  The status/input
+/// pins (`state_word` .. `in`) are HAL_OUT — we publish them from the process
+/// image in `_read`.  Each pin has a matching process-data offset (`*_os`).
+typedef struct {
+  // output / control side (HAL_IN, we write to the module)
+  hal_u32_t *ctrl_word;                       // 0x7000+:1  CtrlWord
+  hal_u32_t *out_length;                      // 0x7000+:2  OutputLength
+  hal_u32_t *transmit_en;                     // 0x7000+:3  TransmitEn
+  hal_u32_t *transmit_sid;                    // 0x7000+:4  TransmitSID
+  hal_u32_t *read_sid;                        // 0x7000+:5  ReadSID
+  hal_u32_t *out[LEADSHINE_EC_SER_DATA_WORDS];  // DataOut0..10
+  // input / status side (HAL_OUT, we read from the module)
+  hal_u32_t *state_word;                      // 0x6000+:1  StateWord
+  hal_u32_t *in_sid;                          // 0x6000+:2  InputSID
+  hal_u32_t *in_length;                       // 0x6000+:3  InputLength
+  hal_u32_t *tx_fifo;                         // 0x6000+:4  TxFifoExist
+  hal_u32_t *rx_fifo;                         // 0x6000+:5  RxFifoExist
+  hal_u32_t *in[LEADSHINE_EC_SER_DATA_WORDS];   // DataIn0..10
+  // process-data offsets, one per pin above
+  unsigned int ctrl_word_os;
+  unsigned int out_length_os;
+  unsigned int transmit_en_os;
+  unsigned int transmit_sid_os;
+  unsigned int read_sid_os;
+  unsigned int out_os[LEADSHINE_EC_SER_DATA_WORDS];
+  unsigned int state_word_os;
+  unsigned int in_sid_os;
+  unsigned int in_length_os;
+  unsigned int tx_fifo_os;
+  unsigned int rx_fifo_os;
+  unsigned int in_os[LEADSHINE_EC_SER_DATA_WORDS];
+} leadshine_ec_serial_port_t;
+
 /// @brief Runtime state for one populated backplane slot.
 ///
 /// Only the class container(s) relevant to the module kind are allocated; the
@@ -145,6 +190,8 @@ typedef struct {
   int enc_count;                     // number of encoder channels
   lcec_class_enc_data_t *enc;        // encoder channel array, or NULL
   unsigned int *enc_pos_os;          // per-encoder position PDO offset, or NULL
+  int ser_ports;                     // number of serial ports (0 if not a serial module)
+  leadshine_ec_serial_port_t ser[LEADSHINE_EC_SER_PORTS];  // per-port serial pins + PDO offsets
 } leadshine_ec_slot_t;
 
 /// @brief Per-slave HAL data: one entry per configured `<subModule>`.
@@ -261,6 +308,10 @@ static const leadshine_ec_module_def_t leadshine_ec_module_table[] = {
     {0x61300126, "R3-E0200-D-V20", MODULE_ENCODER, 2, 0, leadshine_ec_encoder_params},
     {0x81300025, "R3-E0200-S", MODULE_ENCODER, 2, 0, leadshine_ec_encoder_params},
     {0x81300125, "R3-E0200-D", MODULE_ENCODER, 2, 0, leadshine_ec_encoder_params},
+
+    // ---- 2-channel RS-485 serial (MOVILINK mailbox) ----
+    // in/out are used here as the port count (2), not a channel count.
+    {0x82100005, "R3-RS02-485", MODULE_SERIAL, 2, 2, NULL},
 
     {0, NULL, MODULE_UNKNOWN, 0, 0, NULL},
 };

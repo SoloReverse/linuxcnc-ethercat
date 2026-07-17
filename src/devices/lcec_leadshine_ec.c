@@ -31,6 +31,33 @@
 /// documentation/R3EC-v2.4.xml.  Digital modules default to the bit-wise PDO
 /// mapping (object 0x6000/0x7000, one BOOL per subindex); packed-word mappings
 /// (0x6001/0x6002) are not used.
+///
+/// ## R3-RS02-485 serial module (MODULE_SERIAL) -- UNTESTED against hardware
+///
+/// The R3-RS02-485 (ident 0x82100005, ESI class "485 Serials") is a 2-channel
+/// RS-485 gateway.  It carries no LinuxCNC-native semantics; instead it maps a
+/// small mailbox into the cyclic process image so userspace can push arbitrary
+/// byte frames -- here specifically MOVILINK telegrams to a SEW MOVIDRIVE.
+/// Determinism does NOT matter: this is a diagnostic / configuration channel,
+/// so the HAL pins are plain u32 registers copied verbatim each cycle.
+///
+/// Per port p (0/1), the CoE objects live at OUTOBJ/INOBJ + slot*SLOT_INCR +
+/// p*4.  The output (RxPDO) side carries a 5-word control header
+/// (CtrlWord, OutputLength, TransmitEn, TransmitSID, ReadSID) plus 11 data
+/// words (DataOut0..10, i.e. 22 bytes); the input (TxPDO) side mirrors it with
+/// a status header (StateWord, InputSID, InputLength, TxFifoExist, RxFifoExist)
+/// plus 11 data words (DataIn0..10).  All entries are 16-bit.
+///
+/// Software handshake (per the ESI, driven entirely from userspace):
+///   TX: fill DataOut0..N, set OutputLength = N bytes, then increment
+///       TransmitSID (send ID).  The module transmits the frame once and
+///       echoes the SID in InputSID / advances StateWord when done.
+///   RX: increment ReadSID to request the next received frame; the module
+///       publishes it in DataIn0..N with InputLength set.  TxFifoExist /
+///       RxFifoExist report FIFO occupancy.
+/// The driver does not interpret any of this -- it only shuttles the words
+/// between HAL and the process image.  There is no hardware to test against,
+/// so the object/subindex map below is trusted from the ESI as documented.
 
 #include "lcec_leadshine_ec.h"
 
@@ -38,6 +65,10 @@
 #include <string.h>
 
 #include "../lcec.h"
+
+// HAL component id, created in lcec_main.c; used for the raw hal_pin_*_newf
+// registrations in the serial module (the class helpers use it internally).
+extern int lcec_comp_id;
 
 static int lcec_leadshine_ec_init(int comp_id, lcec_slave_t *slave);
 static void lcec_leadshine_ec_read(lcec_slave_t *slave, long period);
@@ -146,6 +177,30 @@ static void leadshine_ec_append_output_pdos(lcec_syncs_t *syncs, lcec_slave_subm
       lcec_syncs_add_pdo_info(syncs, pdo);
       lcec_syncs_add_pdo_entry(syncs, obj, 1, 8);  // USINT
       break;
+    case MODULE_SERIAL:
+      // Two ports; port p uses object window obj+p*4 and PDOs pdo+p*4+{0..3}.
+      // Per port: a 5-word control PDO then three data PDOs of 4/4/3 words.
+      for (int p = 0; p < LEADSHINE_EC_SER_PORTS; p++) {
+        uint16_t octrl = obj + p * LEADSHINE_EC_SER_PORT_INCR;
+        uint16_t opdo = pdo + p * LEADSHINE_EC_SER_PORT_INCR;
+        lcec_syncs_add_pdo_info(syncs, opdo);  // control: CtrlWord..ReadSID
+        for (int sub = 1; sub <= 5; sub++) {
+          lcec_syncs_add_pdo_entry(syncs, octrl, sub, 16);  // UINT
+        }
+        lcec_syncs_add_pdo_info(syncs, opdo + 1);  // DataOut0..3
+        for (int sub = 1; sub <= 4; sub++) {
+          lcec_syncs_add_pdo_entry(syncs, octrl + 1, sub, 16);
+        }
+        lcec_syncs_add_pdo_info(syncs, opdo + 2);  // DataOut4..7
+        for (int sub = 1; sub <= 4; sub++) {
+          lcec_syncs_add_pdo_entry(syncs, octrl + 2, sub, 16);
+        }
+        lcec_syncs_add_pdo_info(syncs, opdo + 3);  // DataOut8..10
+        for (int sub = 1; sub <= 3; sub++) {
+          lcec_syncs_add_pdo_entry(syncs, octrl + 3, sub, 16);
+        }
+      }
+      break;
     default: break;
   }
 }
@@ -194,6 +249,30 @@ static void leadshine_ec_append_input_pdos(lcec_syncs_t *syncs, lcec_slave_submo
       // TODO(hw): the encoder also declares further mandatory TxPDOs (0x1A01+,
       // latch/compare).  They are not mapped here; if a module fails to reach
       // OP without them, add them following the ESI.
+      break;
+    case MODULE_SERIAL:
+      // Mirror of the output side: per port a 5-word status PDO then three data
+      // PDOs of 4/4/3 words (INOBJ / TXPDO).
+      for (int p = 0; p < LEADSHINE_EC_SER_PORTS; p++) {
+        uint16_t istat = obj + p * LEADSHINE_EC_SER_PORT_INCR;
+        uint16_t ipdo = pdo + p * LEADSHINE_EC_SER_PORT_INCR;
+        lcec_syncs_add_pdo_info(syncs, ipdo);  // status: StateWord..RxFifoExist
+        for (int sub = 1; sub <= 5; sub++) {
+          lcec_syncs_add_pdo_entry(syncs, istat, sub, 16);  // UINT
+        }
+        lcec_syncs_add_pdo_info(syncs, ipdo + 1);  // DataIn0..3
+        for (int sub = 1; sub <= 4; sub++) {
+          lcec_syncs_add_pdo_entry(syncs, istat + 1, sub, 16);
+        }
+        lcec_syncs_add_pdo_info(syncs, ipdo + 2);  // DataIn4..7
+        for (int sub = 1; sub <= 4; sub++) {
+          lcec_syncs_add_pdo_entry(syncs, istat + 2, sub, 16);
+        }
+        lcec_syncs_add_pdo_info(syncs, ipdo + 3);  // DataIn8..10
+        for (int sub = 1; sub <= 3; sub++) {
+          lcec_syncs_add_pdo_entry(syncs, istat + 3, sub, 16);
+        }
+      }
       break;
     default: break;
   }
@@ -286,6 +365,66 @@ static void leadshine_ec_register_enc(lcec_slave_t *slave, leadshine_ec_slot_t *
     // class_enc registers no PDO itself; map the 32-bit position value here
     // (0x6000:1..N, DINT).
     lcec_pdo_init(slave, obj, ch + 1, &slot->enc_pos_os[ch], NULL);
+  }
+}
+
+/// @brief Register one serial-port HAL pin and capture its process-data offset.
+///
+/// Name shape: "<module>.<master>.<slave>.<base>-p<port>-<leaf>", e.g.
+/// "lcec.0.r3ec01.ser-p0-out0".  `dir` is HAL_IN for control/output words
+/// (user -> module) and HAL_OUT for status/input words (module -> user).
+static void leadshine_ec_register_ser_pin(lcec_slave_t *slave, const char *base, int port, const char *leaf, hal_pin_dir_t dir,
+    hal_u32_t **pin, uint16_t obj, uint16_t subidx, unsigned int *os) {
+  lcec_master_t *master = slave->master;
+  int err = hal_pin_u32_newf(dir, pin, lcec_comp_id, "%s.%s.%s.%s-p%d-%s", LCEC_MODULE_NAME, master->name, slave->name, base, port,
+      leaf);
+  if (err != 0) {
+    rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "%s.%s: failed registering serial pin %s-p%d-%s\n", master->name, slave->name, base,
+        port, leaf);
+    return;
+  }
+  // Capture the cyclic-image offset for the same 16-bit object entry.
+  lcec_pdo_init(slave, obj, subidx, os, NULL);
+}
+
+static void leadshine_ec_register_serial(lcec_slave_t *slave, leadshine_ec_slot_t *slot, const char *base, int ports) {
+  uint16_t octrl_base = LEADSHINE_EC_OUTOBJ + slot->id * LEADSHINE_EC_SLOT_INCR;
+  uint16_t istat_base = LEADSHINE_EC_INOBJ + slot->id * LEADSHINE_EC_SLOT_INCR;
+  char leaf[16];
+
+  slot->ser_ports = ports;
+  for (int p = 0; p < ports; p++) {
+    leadshine_ec_serial_port_t *port = &slot->ser[p];
+    uint16_t octrl = octrl_base + p * LEADSHINE_EC_SER_PORT_INCR;
+    uint16_t istat = istat_base + p * LEADSHINE_EC_SER_PORT_INCR;
+
+    // Output / control words (HAL_IN, user -> module): 0x7000+ ctrl object subs
+    // 1..5, then DataOut0..10 spread over data objects octrl+1..+3.
+    leadshine_ec_register_ser_pin(slave, base, p, "ctrl-word", HAL_IN, &port->ctrl_word, octrl, 1, &port->ctrl_word_os);
+    leadshine_ec_register_ser_pin(slave, base, p, "out-length", HAL_IN, &port->out_length, octrl, 2, &port->out_length_os);
+    leadshine_ec_register_ser_pin(slave, base, p, "transmit-en", HAL_IN, &port->transmit_en, octrl, 3, &port->transmit_en_os);
+    leadshine_ec_register_ser_pin(slave, base, p, "transmit-sid", HAL_IN, &port->transmit_sid, octrl, 4, &port->transmit_sid_os);
+    leadshine_ec_register_ser_pin(slave, base, p, "read-sid", HAL_IN, &port->read_sid, octrl, 5, &port->read_sid_os);
+    for (int w = 0; w < LEADSHINE_EC_SER_DATA_WORDS; w++) {
+      uint16_t dobj = octrl + 1 + w / 4;  // data objects octrl+1, +2, +3
+      uint16_t dsub = (w % 4) + 1;        // subindices 1..4 (last object 1..3)
+      snprintf(leaf, sizeof(leaf), "out%d", w);
+      leadshine_ec_register_ser_pin(slave, base, p, leaf, HAL_IN, &port->out[w], dobj, dsub, &port->out_os[w]);
+    }
+
+    // Input / status words (HAL_OUT, module -> user): 0x6000+ status object subs
+    // 1..5, then DataIn0..10 spread over data objects istat+1..+3.
+    leadshine_ec_register_ser_pin(slave, base, p, "state-word", HAL_OUT, &port->state_word, istat, 1, &port->state_word_os);
+    leadshine_ec_register_ser_pin(slave, base, p, "in-sid", HAL_OUT, &port->in_sid, istat, 2, &port->in_sid_os);
+    leadshine_ec_register_ser_pin(slave, base, p, "in-length", HAL_OUT, &port->in_length, istat, 3, &port->in_length_os);
+    leadshine_ec_register_ser_pin(slave, base, p, "tx-fifo", HAL_OUT, &port->tx_fifo, istat, 4, &port->tx_fifo_os);
+    leadshine_ec_register_ser_pin(slave, base, p, "rx-fifo", HAL_OUT, &port->rx_fifo, istat, 5, &port->rx_fifo_os);
+    for (int w = 0; w < LEADSHINE_EC_SER_DATA_WORDS; w++) {
+      uint16_t dobj = istat + 1 + w / 4;  // data objects istat+1, +2, +3
+      uint16_t dsub = (w % 4) + 1;        // subindices 1..4 (last object 1..3)
+      snprintf(leaf, sizeof(leaf), "in%d", w);
+      leadshine_ec_register_ser_pin(slave, base, p, leaf, HAL_OUT, &port->in[w], dobj, dsub, &port->in_os[w]);
+    }
   }
 }
 
@@ -482,6 +621,7 @@ static int lcec_leadshine_ec_init(int comp_id, lcec_slave_t *slave) {
       case MODULE_AIN: leadshine_ec_register_ain(slave, slot, s->name, def->in); break;
       case MODULE_AOUT: leadshine_ec_register_aout(slave, slot, s->name, def->out); break;
       case MODULE_ENCODER: leadshine_ec_register_enc(slave, slot, s->name, def->in); break;
+      case MODULE_SERIAL: leadshine_ec_register_serial(slave, slot, s->name, LEADSHINE_EC_SER_PORTS); break;
       default: break;
     }
 
@@ -521,11 +661,23 @@ static void lcec_leadshine_ec_read(lcec_slave_t *slave, long period) {
     for (int ch = 0; ch < slot->enc_count; ch++) {
       class_enc_update(&slot->enc[ch], 0, 1.0, EC_READ_U32(&pd[slot->enc_pos_os[ch]]), 0, 0);
     }
+    for (int p = 0; p < slot->ser_ports; p++) {
+      leadshine_ec_serial_port_t *port = &slot->ser[p];
+      *(port->state_word) = EC_READ_U16(&pd[port->state_word_os]);
+      *(port->in_sid) = EC_READ_U16(&pd[port->in_sid_os]);
+      *(port->in_length) = EC_READ_U16(&pd[port->in_length_os]);
+      *(port->tx_fifo) = EC_READ_U16(&pd[port->tx_fifo_os]);
+      *(port->rx_fifo) = EC_READ_U16(&pd[port->rx_fifo_os]);
+      for (int w = 0; w < LEADSHINE_EC_SER_DATA_WORDS; w++) {
+        *(port->in[w]) = EC_READ_U16(&pd[port->in_os[w]]);
+      }
+    }
   }
 }
 
 static void lcec_leadshine_ec_write(lcec_slave_t *slave, long period) {
   lcec_leadshine_ec_data_t *hal_data = (lcec_leadshine_ec_data_t *)slave->hal_data;
+  uint8_t *pd = slave->master->process_data;
 
   if (!slave->state.operational) {
     return;
@@ -538,6 +690,17 @@ static void lcec_leadshine_ec_write(lcec_slave_t *slave, long period) {
     }
     if (slot->aout != NULL) {
       lcec_aout_write_all(slave, slot->aout);
+    }
+    for (int p = 0; p < slot->ser_ports; p++) {
+      leadshine_ec_serial_port_t *port = &slot->ser[p];
+      EC_WRITE_U16(&pd[port->ctrl_word_os], (uint16_t)*(port->ctrl_word));
+      EC_WRITE_U16(&pd[port->out_length_os], (uint16_t)*(port->out_length));
+      EC_WRITE_U16(&pd[port->transmit_en_os], (uint16_t)*(port->transmit_en));
+      EC_WRITE_U16(&pd[port->transmit_sid_os], (uint16_t)*(port->transmit_sid));
+      EC_WRITE_U16(&pd[port->read_sid_os], (uint16_t)*(port->read_sid));
+      for (int w = 0; w < LEADSHINE_EC_SER_DATA_WORDS; w++) {
+        EC_WRITE_U16(&pd[port->out_os[w]], (uint16_t)*(port->out[w]));
+      }
     }
   }
 }

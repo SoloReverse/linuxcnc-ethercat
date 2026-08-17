@@ -97,6 +97,17 @@
 #define LEADSHINE_EC_SUB_ENC_COUNTMODE 8  // encoder: count mode (USINT8)
 #define LEADSHINE_EC_SUB_ENC_FILTER    9  // encoder: input filter (UINT16)
 
+// The encoder module also carries 4 high-speed digital inputs (IN0..IN3) and
+// 4 digital outputs (OUT0..OUT3) on its own terminals.  The inputs arrive in
+// the "IO status INPUT" byte of the module's last TxPDO, whose object sits at
+// offset 6 in the slot's CoE window; the outputs are the encoder RxPDO's
+// single "general output" byte at <outbase>:01.
+#define LEADSHINE_EC_ENC_IOOBJ    6  // offset of the IO-status object within the slot
+#define LEADSHINE_EC_SUB_ENC_IO_OUT 1  // IO status OUTPUT (readback)
+#define LEADSHINE_EC_SUB_ENC_IO_IN  2  // IO status INPUT
+#define LEADSHINE_EC_ENC_DIN      4  // IN0..IN3
+#define LEADSHINE_EC_ENC_DOUT     4  // OUT0..OUT3
+
 /// @brief Pack per-type geometry into the typelist `flags` field.
 /// @param max_slots Number of backplane slots the coupler supports.
 /// @param pdo_incr  PDO index increment per slot (0x10 R2EC, 0x08 R3EC).
@@ -204,15 +215,20 @@ static const lcec_modparam_desc_t leadshine_ec_analog_params[] = {
 // particular min/max really are the full int32 range -- the previous
 // +/-100000 would have silently wrapped the count after ~10 turns of a
 // 2500 PPR encoder in 4x mode.
+// Values below are from the R3 Series Extension Module User Manual, section
+// 6.11.2 (R3-E0200-S).  Note encoderMode defaults to 0 = 1x, so a quadrature
+// encoder counts one edge per cycle unless you ask for 2 (4x); on a 2500 PPR
+// encoder that is 2500 counts/rev rather than 10000.
 static const lcec_modparam_desc_t leadshine_ec_encoder_params[] = {
-    {"encoderMode", LEADSHINE_EC_MP_ENC_MODE, MODPARAM_TYPE_U32, "0", "Encoder operation mode (0-4, see module manual)"},
-    {"abPhase", LEADSHINE_EC_MP_ENC_ABPHASE, MODPARAM_TYPE_U32, "0", "AB phase order; 1 swaps A/B to reverse count direction (0-1)"},
+    {"encoderMode", LEADSHINE_EC_MP_ENC_MODE, MODPARAM_TYPE_U32, "0",
+        "0=AB 1x, 1=AB 2x, 2=AB 4x, 3=pulse+direction, 4=CW/CCW"},
+    {"abPhase", LEADSHINE_EC_MP_ENC_ABPHASE, MODPARAM_TYPE_U32, "0", "0=positive phase, 1=negative (reverses count direction)"},
     {"presetValue", LEADSHINE_EC_MP_ENC_SETVALUE, MODPARAM_TYPE_S32, "0", "Value loaded into the counter"},
-    {"minValue", LEADSHINE_EC_MP_ENC_MINVALUE, MODPARAM_TYPE_S32, "-2147483647", "Minimum counter value before wrap"},
-    {"maxValue", LEADSHINE_EC_MP_ENC_MAXVALUE, MODPARAM_TYPE_S32, "2147483646", "Maximum counter value before wrap"},
-    {"zPhaseClear", LEADSHINE_EC_MP_ENC_ZCLEAR, MODPARAM_TYPE_U32, "0", "1 = clear the counter on the Z/index pulse"},
-    {"countMode", LEADSHINE_EC_MP_ENC_COUNTMODE, MODPARAM_TYPE_U32, "0", "Counting mode (0-1, see module manual)"},
-    {"encoderFilter", LEADSHINE_EC_MP_ENC_FILTER, MODPARAM_TYPE_U32, "2", "Encoder input filter"},
+    {"minValue", LEADSHINE_EC_MP_ENC_MINVALUE, MODPARAM_TYPE_S32, "-2147483647", "Counter minimum; only meaningful in ring mode"},
+    {"maxValue", LEADSHINE_EC_MP_ENC_MAXVALUE, MODPARAM_TYPE_S32, "2147483647", "Counter maximum; only meaningful in ring mode"},
+    {"zPhaseClear", LEADSHINE_EC_MP_ENC_ZCLEAR, MODPARAM_TYPE_U32, "0", "Z-phase pulse reset: 0=disabled, 1=enabled"},
+    {"countMode", LEADSHINE_EC_MP_ENC_COUNTMODE, MODPARAM_TYPE_U32, "0", "0=ring (wraps at min/max), 1=linear"},
+    {"encoderFilter", LEADSHINE_EC_MP_ENC_FILTER, MODPARAM_TYPE_U32, "2", "Input filter time, unit 100 ns (0-65535)"},
     {NULL},
 };
 

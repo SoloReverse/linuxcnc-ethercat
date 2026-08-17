@@ -336,6 +336,27 @@ static int leadshine_ec_register_enc(lcec_slave_t *slave, leadshine_ec_slot_t *s
       return err;
     }
   }
+
+  // The encoder module is not encoder-only: it also carries four high-speed
+  // digital inputs (IN0..IN3, 200 kHz, NPN/PNP) and four outputs (OUT0..OUT3,
+  // 5-24 V, 300 mA).  They ride in PDOs the driver already has to map -- the
+  // inputs in the "IO status INPUT" byte of TxPDO 0x1A04, the outputs in the
+  // encoder RxPDO's "general output" byte -- so exposing them costs no extra
+  // process data and is the difference between the module's I/O being usable
+  // and being silently dropped.
+  slot->din = lcec_din_allocate_channels(LEADSHINE_EC_ENC_DIN);
+  for (int ch = 0; ch < LEADSHINE_EC_ENC_DIN; ch++) {
+    slot->din->channels[ch] =
+        lcec_din_register_channel_packed(slave, obj + LEADSHINE_EC_ENC_IOOBJ, LEADSHINE_EC_SUB_ENC_IO_IN, ch,
+            leadshine_ec_name(base, "din", ch));
+  }
+
+  uint16_t outobj = LEADSHINE_EC_OUTOBJ + slot->id * LEADSHINE_EC_SLOT_INCR;
+  slot->dout = lcec_dout_allocate_channels(LEADSHINE_EC_ENC_DOUT);
+  for (int ch = 0; ch < LEADSHINE_EC_ENC_DOUT; ch++) {
+    slot->dout->channels[ch] = lcec_dout_register_channel_packed(slave, outobj, 1, ch, leadshine_ec_name(base, "dout", ch));
+  }
+
   return 0;
 }
 

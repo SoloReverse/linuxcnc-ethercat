@@ -88,6 +88,12 @@
 #define LEADSHINE_EC_SUB_SAFESTATE_HI 2  // DO 32-ch: output state on link loss, bits 16-31 (UINT16)
 #define LEADSHINE_EC_SUB_FILTER_BASE  3  // DI: input filter, subindices 3..6 per 8-channel group (UINT16)
 #define LEADSHINE_EC_SUB_ANALOG_BASE  1  // AIN/AOUT: per-channel range/mode config, sub 1..4 (USINT8)
+
+// DA-only objects, offsets within the slot's 0x10-wide config window:
+// <cfgbase>+2 = per-channel behaviour when the EtherCAT link is lost,
+// <cfgbase>+3 = the value output in "preset" mode.  Both are sub 1..4.
+#define LEADSHINE_EC_AOUT_LINKLOST_OBJ 2
+#define LEADSHINE_EC_AOUT_LINKVAL_OBJ  3
 #define LEADSHINE_EC_SUB_ENC_MODE     1  // encoder: operation mode (USINT8)
 #define LEADSHINE_EC_SUB_ENC_ABPHASE  2  // encoder: AB phase (USINT8)
 #define LEADSHINE_EC_SUB_ENC_SETVALUE 3  // encoder: preset counter value (DINT32)
@@ -174,6 +180,8 @@ typedef struct {
 #define LEADSHINE_EC_MP_SAFESTATE      1  // digital output safe value on link loss
 #define LEADSHINE_EC_MP_INPUTFILTER(g) (3 + (g))  // digital input filter, group g (0..3)
 #define LEADSHINE_EC_MP_ANALOG_CFG(ch) (2 + (ch))  // analog channel config, ch (0..3)
+#define LEADSHINE_EC_MP_AOUT_LINKLOST     6        // DA: output behaviour on link loss
+#define LEADSHINE_EC_MP_AOUT_LINKLOSTVAL  7        // DA: output value on link loss
 #define LEADSHINE_EC_MP_ENC_MODE       2
 #define LEADSHINE_EC_MP_ENC_ABPHASE    3
 #define LEADSHINE_EC_MP_ENC_MINVALUE   4
@@ -192,19 +200,43 @@ static const lcec_modparam_desc_t leadshine_ec_digital_params[] = {
     {NULL},
 };
 
-// Per-channel range/mode select, 0x8000+slot*0x10 sub 1..4.  This one table is
-// shared by AD and DA modules, which do NOT share an encoding: per the ESI, AD
-// accepts 0..7 and powers up at 2, DA accepts 0..6 and powers up at 4.  The
-// ESI does not say which code means which range, so read the value off the
-// module (it ships correct) and confirm with a meter before overriding.  Since
-// there is no single correct default, these entries are documented as
-// "unset" -- the driver writes nothing unless the XML specifies a value, which
-// leaves the module in its as-shipped state.
-static const lcec_modparam_desc_t leadshine_ec_analog_params[] = {
-    {"ch0Config", LEADSHINE_EC_MP_ANALOG_CFG(0), MODPARAM_TYPE_U32, NULL, "Channel 0 range/mode (AD 0-7 def 2, DA 0-6 def 4)"},
-    {"ch1Config", LEADSHINE_EC_MP_ANALOG_CFG(1), MODPARAM_TYPE_U32, NULL, "Channel 1 range/mode (AD 0-7 def 2, DA 0-6 def 4)"},
-    {"ch2Config", LEADSHINE_EC_MP_ANALOG_CFG(2), MODPARAM_TYPE_U32, NULL, "Channel 2 range/mode (AD 0-7 def 2, DA 0-6 def 4)"},
-    {"ch3Config", LEADSHINE_EC_MP_ANALOG_CFG(3), MODPARAM_TYPE_U32, NULL, "Channel 3 range/mode (AD 0-7 def 2, DA 0-6 def 4)"},
+// Per-channel range/mode select, 0x8000+slot*0x10 sub 1..4.  AD and DA do not
+// share an encoding, so they get separate tables -- otherwise the XML would
+// accept a DA-only setting on an AD module and silently drop it.  Both ship
+// correctly configured, so an omitted modparam writes nothing and leaves the
+// module as-is.
+//
+// AD (R3-A0400-IV), per manual 6.6.  Note the codes are NOT the same as the
+// DA module's below -- e.g. 2 is +/-10V here but +/-5V there.
+#define LS_AD_RANGES "0=+/-5V 1=1-5V 2=+/-10V(default) 3=0-10V 4=0-20mA 5=4-20mA 6=0-5V 7=+/-20mA"
+static const lcec_modparam_desc_t leadshine_ec_ain_params[] = {
+    {"ch0Config", LEADSHINE_EC_MP_ANALOG_CFG(0), MODPARAM_TYPE_U32, NULL, "Channel 0 input range: " LS_AD_RANGES},
+    {"ch1Config", LEADSHINE_EC_MP_ANALOG_CFG(1), MODPARAM_TYPE_U32, NULL, "Channel 1 input range: " LS_AD_RANGES},
+    {"ch2Config", LEADSHINE_EC_MP_ANALOG_CFG(2), MODPARAM_TYPE_U32, NULL, "Channel 2 input range: " LS_AD_RANGES},
+    {"ch3Config", LEADSHINE_EC_MP_ANALOG_CFG(3), MODPARAM_TYPE_U32, NULL, "Channel 3 input range: " LS_AD_RANGES},
+    {NULL},
+};
+
+// DA (R3-A0004-IV), per manual 6.7.1.  Full scale is +/-32000 counts.
+//
+// linkLostMode matters for safety: the module's own default is 0 = Hold, so a
+// dropped EtherCAT link leaves the last commanded value on the terminals.
+// When the output is a velocity reference to a drive, that means the drive
+// keeps running at the last commanded speed.  Set 1 (Clear) unless something
+// else in the machine already handles that case.
+static const lcec_modparam_desc_t leadshine_ec_aout_params[] = {
+    {"ch0Config", LEADSHINE_EC_MP_ANALOG_CFG(0), MODPARAM_TYPE_U32, NULL,
+        "Channel 0 output range: 0=0-5V 1=1-5V 2=+/-5V 3=0-10V 4=+/-10V 5=0-20mA 6=4-20mA"},
+    {"ch1Config", LEADSHINE_EC_MP_ANALOG_CFG(1), MODPARAM_TYPE_U32, NULL,
+        "Channel 1 output range: 0=0-5V 1=1-5V 2=+/-5V 3=0-10V 4=+/-10V 5=0-20mA 6=4-20mA"},
+    {"ch2Config", LEADSHINE_EC_MP_ANALOG_CFG(2), MODPARAM_TYPE_U32, NULL,
+        "Channel 2 output range: 0=0-5V 1=1-5V 2=+/-5V 3=0-10V 4=+/-10V 5=0-20mA 6=4-20mA"},
+    {"ch3Config", LEADSHINE_EC_MP_ANALOG_CFG(3), MODPARAM_TYPE_U32, NULL,
+        "Channel 3 output range: 0=0-5V 1=1-5V 2=+/-5V 3=0-10V 4=+/-10V 5=0-20mA 6=4-20mA"},
+    {"linkLostMode", LEADSHINE_EC_MP_AOUT_LINKLOST, MODPARAM_TYPE_U32, NULL,
+        "All channels, on EtherCAT link loss: 0=hold last value (module default), 1=clear to zero, 2=output linkLostValue"},
+    {"linkLostValue", LEADSHINE_EC_MP_AOUT_LINKLOSTVAL, MODPARAM_TYPE_S32, NULL,
+        "All channels, value output when linkLostMode=2 (-32000..32000, full scale)"},
     {NULL},
 };
 
@@ -284,14 +316,14 @@ static const leadshine_ec_module_def_t leadshine_ec_module_table[] = {
     {0x81101445, "R3-3232-N-1", MODULE_DIO, 32, 32, leadshine_ec_digital_params},
 
     // ---- Analog input ----
-    {0x61000025, "PM-A0400-IV", MODULE_AIN, 4, 0, leadshine_ec_analog_params},
-    {0x61000026, "R3-A0400-IV-V20", MODULE_AIN, 4, 0, leadshine_ec_analog_params},
-    {0x81000025, "R3-A0400-IV", MODULE_AIN, 4, 0, leadshine_ec_analog_params},
+    {0x61000025, "PM-A0400-IV", MODULE_AIN, 4, 0, leadshine_ec_ain_params},
+    {0x61000026, "R3-A0400-IV-V20", MODULE_AIN, 4, 0, leadshine_ec_ain_params},
+    {0x81000025, "R3-A0400-IV", MODULE_AIN, 4, 0, leadshine_ec_ain_params},
 
     // ---- Analog output ----
-    {0x61000205, "PM-A0004-IV", MODULE_AOUT, 0, 4, leadshine_ec_analog_params},
-    {0x61000206, "R3-A0004-IV-V20", MODULE_AOUT, 0, 4, leadshine_ec_analog_params},
-    {0x81000205, "R3-A0004-IV", MODULE_AOUT, 0, 4, leadshine_ec_analog_params},
+    {0x61000205, "PM-A0004-IV", MODULE_AOUT, 0, 4, leadshine_ec_aout_params},
+    {0x61000206, "R3-A0004-IV-V20", MODULE_AOUT, 0, 4, leadshine_ec_aout_params},
+    {0x81000205, "R3-A0004-IV", MODULE_AOUT, 0, 4, leadshine_ec_aout_params},
 
     // ---- Encoder ----
     {0x61300025, "PM-E0200-S", MODULE_ENCODER, 2, 0, leadshine_ec_encoder_params},

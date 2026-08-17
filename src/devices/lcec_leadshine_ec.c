@@ -406,6 +406,25 @@ static int leadshine_ec_apply_modparams(lcec_slave_t *slave, lcec_slave_submodul
     }
   }
 
+  // DA link-loss behaviour.  The module defaults to "hold last value", which
+  // for an analog velocity reference means a dropped bus leaves the drive
+  // commanded at its last speed; both settings apply to all four channels.
+  if (def->type == MODULE_AOUT) {
+    LCEC_CONF_MODPARAM_VAL_T *mode = lcec_submodule_modparam_get(sub, LEADSHINE_EC_MP_AOUT_LINKLOST);
+    LCEC_CONF_MODPARAM_VAL_T *val = lcec_submodule_modparam_get(sub, LEADSHINE_EC_MP_AOUT_LINKLOSTVAL);
+
+    for (int ch = 0; ch < def->out && ch < 4; ch++) {
+      if (val != NULL && (err = lcec_write_sdo16(slave, cfg + LEADSHINE_EC_AOUT_LINKVAL_OBJ, ch + 1, (uint16_t)val->s32)) != 0) {
+        return err;
+      }
+      // written after the value, so "output preset" never takes effect with a
+      // stale preset still loaded
+      if (mode != NULL && (err = lcec_write_sdo8(slave, cfg + LEADSHINE_EC_AOUT_LINKLOST_OBJ, ch + 1, mode->u32 & 0xff)) != 0) {
+        return err;
+      }
+    }
+  }
+
   // encoder config: one object per encoder channel (0x8000 = ch0, 0x8001 = ch1).
   // A single set of modparams is applied to every channel on the module.
   if (def->type == MODULE_ENCODER) {

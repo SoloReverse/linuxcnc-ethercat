@@ -184,16 +184,53 @@ static void leadshine_ec_append_input_pdos(lcec_syncs_t *syncs, lcec_slave_submo
       }
       break;
     case MODULE_ENCODER:
-      lcec_syncs_add_pdo_info(syncs, pdo);  // 0x1A00 position + error
+      // The encoder declares FIVE TxPDOs and the ESI marks every one of them
+      // Mandatory="1", so all five are assigned to SM3.  Only the first
+      // carries pins; the rest are mapped purely so the module's declared
+      // process image is complete.  Their objects are 0x6001..0x6006 within
+      // the slot's 0x10-wide CoE window (all DependOnSlot), and their PDO
+      // indices are consecutive from the slot's TxPDO base -- confirmed on an
+      // R3EC where an R3-E0200-S-V20 in slot 3 answers on 0x1A18..0x1A1C.
+      lcec_syncs_add_pdo_info(syncs, pdo);  // 0x1A00: position + error
       for (int ch = 0; ch < def->in; ch++) {
         lcec_syncs_add_pdo_entry(syncs, obj, ch + 1, 32);  // DINT position
       }
       for (int ch = 0; ch < def->in; ch++) {
         lcec_syncs_add_pdo_entry(syncs, obj, def->in + ch + 1, 8);  // USINT error
       }
-      // TODO(hw): the encoder also declares further mandatory TxPDOs (0x1A01+,
-      // latch/compare).  They are not mapped here; if a module fails to reach
-      // OP without them, add them following the ESI.
+
+      // 0x1A01: latch, per channel {status U8, value DINT, fifo count UINT}
+      lcec_syncs_add_pdo_info(syncs, pdo + 1);
+      for (int ch = 0; ch < def->in; ch++) {
+        uint16_t lobj = obj + 1 + ch;  // 0x6001, 0x6002
+        lcec_syncs_add_pdo_entry(syncs, lobj, 1, 8);
+        lcec_syncs_add_pdo_entry(syncs, lobj, 2, 32);
+        lcec_syncs_add_pdo_entry(syncs, lobj, 3, 16);
+      }
+
+      // 0x1A02: hardware compare, per channel
+      // {status U8, fifo exist UINT, finished UINT, current pos DINT}
+      lcec_syncs_add_pdo_info(syncs, pdo + 2);
+      for (int ch = 0; ch < def->in; ch++) {
+        uint16_t hobj = obj + 3 + ch;  // 0x6003, 0x6004
+        lcec_syncs_add_pdo_entry(syncs, hobj, 1, 8);
+        lcec_syncs_add_pdo_entry(syncs, hobj, 2, 16);
+        lcec_syncs_add_pdo_entry(syncs, hobj, 3, 16);
+        lcec_syncs_add_pdo_entry(syncs, hobj, 4, 32);
+      }
+
+      // 0x1A03: 2D compare (module-wide, not per channel)
+      lcec_syncs_add_pdo_info(syncs, pdo + 3);
+      lcec_syncs_add_pdo_entry(syncs, obj + 5, 1, 8);   // status
+      lcec_syncs_add_pdo_entry(syncs, obj + 5, 2, 16);  // fifo exist
+      lcec_syncs_add_pdo_entry(syncs, obj + 5, 3, 16);  // finished
+      lcec_syncs_add_pdo_entry(syncs, obj + 5, 4, 32);  // current X
+      lcec_syncs_add_pdo_entry(syncs, obj + 5, 5, 32);  // current Y
+
+      // 0x1A04: the module's own IO status bytes
+      lcec_syncs_add_pdo_info(syncs, pdo + 4);
+      lcec_syncs_add_pdo_entry(syncs, obj + 6, 1, 8);  // IO status OUTPUT
+      lcec_syncs_add_pdo_entry(syncs, obj + 6, 2, 8);  // IO status INPUT
       break;
     default: break;
   }
@@ -276,17 +313,30 @@ static void leadshine_ec_register_aout(lcec_slave_t *slave, leadshine_ec_slot_t 
   }
 }
 
-static void leadshine_ec_register_enc(lcec_slave_t *slave, leadshine_ec_slot_t *slot, const char *base, int count) {
+static int leadshine_ec_register_enc(lcec_slave_t *slave, leadshine_ec_slot_t *slot, const char *base, int count) {
   uint16_t obj = LEADSHINE_EC_INOBJ + slot->id * LEADSHINE_EC_SLOT_INCR;
+  int err;
+
   slot->enc_count = count;
   slot->enc = LCEC_HAL_ALLOCATE_ARRAY(lcec_class_enc_data_t, count);
   slot->enc_pos_os = LCEC_HAL_ALLOCATE_ARRAY(unsigned int, count);
+  slot->enc_err_os = LCEC_HAL_ALLOCATE_ARRAY(unsigned int, count);
+  slot->enc_error = LCEC_HAL_ALLOCATE_ARRAY(hal_u32_t *, count);
+
   for (int ch = 0; ch < count; ch++) {
     class_enc_init(slave, &slot->enc[ch], 32, leadshine_ec_name(base, "enc", ch));
     // class_enc registers no PDO itself; map the 32-bit position value here
-    // (0x6000:1..N, DINT).
+    // (0x6000:1..N, DINT) and the module's per-channel error byte that follows
+    // it in the same object (0x6000:N+1..2N, USINT).
     lcec_pdo_init(slave, obj, ch + 1, &slot->enc_pos_os[ch], NULL);
+    lcec_pdo_init(slave, obj, count + ch + 1, &slot->enc_err_os[ch], NULL);
+
+    if ((err = lcec_pin_newf(HAL_U32, HAL_OUT, (void **)&slot->enc_error[ch], "%s.%s.%s.%s-enc-%d-error", LCEC_MODULE_NAME,
+             slave->master->name, slave->name, base, ch)) != 0) {
+      return err;
+    }
   }
+  return 0;
 }
 
 // ------------------------------------------------------------------
@@ -348,6 +398,10 @@ static int leadshine_ec_apply_modparams(lcec_slave_t *slave, lcec_slave_submodul
           (err = lcec_write_sdo8(slave, eobj, LEADSHINE_EC_SUB_ENC_ABPHASE, v->u32 & 0xff)) != 0) {
         return err;
       }
+      if ((v = lcec_submodule_modparam_get(sub, LEADSHINE_EC_MP_ENC_ZCLEAR)) != NULL &&
+          (err = lcec_write_sdo8(slave, eobj, LEADSHINE_EC_SUB_ENC_ZCLEAR, v->u32 & 0xff)) != 0) {
+        return err;
+      }
       if ((v = lcec_submodule_modparam_get(sub, LEADSHINE_EC_MP_ENC_MINVALUE)) != NULL &&
           (err = lcec_write_sdo32(slave, eobj, LEADSHINE_EC_SUB_ENC_MIN, (uint32_t)v->s32)) != 0) {
         return err;
@@ -362,6 +416,12 @@ static int leadshine_ec_apply_modparams(lcec_slave_t *slave, lcec_slave_submodul
       }
       if ((v = lcec_submodule_modparam_get(sub, LEADSHINE_EC_MP_ENC_FILTER)) != NULL &&
           (err = lcec_write_sdo16(slave, eobj, LEADSHINE_EC_SUB_ENC_FILTER, v->u32 & 0xffff)) != 0) {
+        return err;
+      }
+      // Written last: loading the counter only makes sense once the limits it
+      // has to fall inside have been applied.
+      if ((v = lcec_submodule_modparam_get(sub, LEADSHINE_EC_MP_ENC_SETVALUE)) != NULL &&
+          (err = lcec_write_sdo32(slave, eobj, LEADSHINE_EC_SUB_ENC_SETVALUE, (uint32_t)v->s32)) != 0) {
         return err;
       }
     }
@@ -450,6 +510,17 @@ static int lcec_leadshine_ec_init(int comp_id, lcec_slave_t *slave) {
   lcec_syncs_t *syncs = LCEC_HAL_ALLOCATE(lcec_syncs_t);
   leadshine_ec_build_syncs(slave, syncs, pdo_incr);
 
+  // Tell the coupler which modules the config expects.  This MUST happen
+  // before any per-slot object is touched: until 0xF030 is written, the
+  // coupler exposes only its own objects (0x1000/0x1018/0x1C12/0x1C13/0xF0xx)
+  // and every per-slot object -- 0x6000/0x7000/0x8000/0xA000 and the
+  // 0x1600/0x1A00 mapping objects -- aborts with 0x06020000 "object does not
+  // exist".  Applying a submodule's <modParam> first therefore failed the
+  // whole init.  Verified against an R3EC with a
+  // DO/DIO/A0004-IV/E0200-S stack: the per-slot objects appear only once the
+  // module ident list has been accepted.
+  leadshine_ec_write_module_list(slave);
+
   // Register HAL pins + PDO entries and apply modparams, one slot at a time.
   int i = 0;
   for (lcec_slave_submodule_t *s = slave->submodules; s != NULL; s = s->next, i++) {
@@ -481,7 +552,11 @@ static int lcec_leadshine_ec_init(int comp_id, lcec_slave_t *slave) {
         break;
       case MODULE_AIN: leadshine_ec_register_ain(slave, slot, s->name, def->in); break;
       case MODULE_AOUT: leadshine_ec_register_aout(slave, slot, s->name, def->out); break;
-      case MODULE_ENCODER: leadshine_ec_register_enc(slave, slot, s->name, def->in); break;
+      case MODULE_ENCODER:
+        if ((err = leadshine_ec_register_enc(slave, slot, s->name, def->in)) != 0) {
+          return err;
+        }
+        break;
       default: break;
     }
 
@@ -490,9 +565,9 @@ static int lcec_leadshine_ec_init(int comp_id, lcec_slave_t *slave) {
     }
   }
 
-  // Tell the coupler which modules the config expects, then force the SM PDO
-  // assignment (the master does not reliably assign the input SM by itself).
-  leadshine_ec_write_module_list(slave);
+  // Force the SM PDO assignment (the master does not reliably assign the input
+  // SM by itself).  The module ident list was written above, before the
+  // per-slot objects were touched.
   if ((err = leadshine_ec_assign_pdos(slave, syncs)) != 0) {
     return err;
   }
@@ -520,6 +595,7 @@ static void lcec_leadshine_ec_read(lcec_slave_t *slave, long period) {
     }
     for (int ch = 0; ch < slot->enc_count; ch++) {
       class_enc_update(&slot->enc[ch], 0, 1.0, EC_READ_U32(&pd[slot->enc_pos_os[ch]]), 0, 0);
+      *(slot->enc_error[ch]) = EC_READ_U8(&pd[slot->enc_err_os[ch]]);
     }
   }
 }

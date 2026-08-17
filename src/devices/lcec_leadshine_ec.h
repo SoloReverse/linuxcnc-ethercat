@@ -90,8 +90,10 @@
 #define LEADSHINE_EC_SUB_ANALOG_BASE  1  // AIN/AOUT: per-channel range/mode config, sub 1..4 (USINT8)
 #define LEADSHINE_EC_SUB_ENC_MODE     1  // encoder: operation mode (USINT8)
 #define LEADSHINE_EC_SUB_ENC_ABPHASE  2  // encoder: AB phase (USINT8)
+#define LEADSHINE_EC_SUB_ENC_SETVALUE 3  // encoder: preset counter value (DINT32)
 #define LEADSHINE_EC_SUB_ENC_MIN      4  // encoder: minimum value (DINT32)
 #define LEADSHINE_EC_SUB_ENC_MAX      5  // encoder: maximum value (DINT32)
+#define LEADSHINE_EC_SUB_ENC_ZCLEAR   7  // encoder: clear counter on Z phase (USINT8)
 #define LEADSHINE_EC_SUB_ENC_COUNTMODE 8  // encoder: count mode (USINT8)
 #define LEADSHINE_EC_SUB_ENC_FILTER    9  // encoder: input filter (UINT16)
 
@@ -145,6 +147,8 @@ typedef struct {
   int enc_count;                     // number of encoder channels
   lcec_class_enc_data_t *enc;        // encoder channel array, or NULL
   unsigned int *enc_pos_os;          // per-encoder position PDO offset, or NULL
+  unsigned int *enc_err_os;          // per-encoder error-byte PDO offset, or NULL
+  hal_u32_t **enc_error;             // per-encoder error-byte pin, or NULL
 } leadshine_ec_slot_t;
 
 /// @brief Per-slave HAL data: one entry per configured `<subModule>`.
@@ -165,6 +169,8 @@ typedef struct {
 #define LEADSHINE_EC_MP_ENC_MAXVALUE   5
 #define LEADSHINE_EC_MP_ENC_COUNTMODE  6
 #define LEADSHINE_EC_MP_ENC_FILTER     7
+#define LEADSHINE_EC_MP_ENC_SETVALUE   8
+#define LEADSHINE_EC_MP_ENC_ZCLEAR     9
 
 static const lcec_modparam_desc_t leadshine_ec_digital_params[] = {
     {"safeState", LEADSHINE_EC_MP_SAFESTATE, MODPARAM_TYPE_U32, "0", "Output value when link is lost (0 = all off)"},
@@ -175,20 +181,37 @@ static const lcec_modparam_desc_t leadshine_ec_digital_params[] = {
     {NULL},
 };
 
+// Per-channel range/mode select, 0x8000+slot*0x10 sub 1..4.  This one table is
+// shared by AD and DA modules, which do NOT share an encoding: per the ESI, AD
+// accepts 0..7 and powers up at 2, DA accepts 0..6 and powers up at 4.  The
+// ESI does not say which code means which range, so read the value off the
+// module (it ships correct) and confirm with a meter before overriding.  Since
+// there is no single correct default, these entries are documented as
+// "unset" -- the driver writes nothing unless the XML specifies a value, which
+// leaves the module in its as-shipped state.
 static const lcec_modparam_desc_t leadshine_ec_analog_params[] = {
-    {"ch0Config", LEADSHINE_EC_MP_ANALOG_CFG(0), MODPARAM_TYPE_U32, "0", "Channel 0 configuration (AD/DA config)"},
-    {"ch1Config", LEADSHINE_EC_MP_ANALOG_CFG(1), MODPARAM_TYPE_U32, "0", "Channel 1 configuration (AD/DA config)"},
-    {"ch2Config", LEADSHINE_EC_MP_ANALOG_CFG(2), MODPARAM_TYPE_U32, "0", "Channel 2 configuration (AD/DA config)"},
-    {"ch3Config", LEADSHINE_EC_MP_ANALOG_CFG(3), MODPARAM_TYPE_U32, "0", "Channel 3 configuration (AD/DA config)"},
+    {"ch0Config", LEADSHINE_EC_MP_ANALOG_CFG(0), MODPARAM_TYPE_U32, NULL, "Channel 0 range/mode (AD 0-7 def 2, DA 0-6 def 4)"},
+    {"ch1Config", LEADSHINE_EC_MP_ANALOG_CFG(1), MODPARAM_TYPE_U32, NULL, "Channel 1 range/mode (AD 0-7 def 2, DA 0-6 def 4)"},
+    {"ch2Config", LEADSHINE_EC_MP_ANALOG_CFG(2), MODPARAM_TYPE_U32, NULL, "Channel 2 range/mode (AD 0-7 def 2, DA 0-6 def 4)"},
+    {"ch3Config", LEADSHINE_EC_MP_ANALOG_CFG(3), MODPARAM_TYPE_U32, NULL, "Channel 3 range/mode (AD 0-7 def 2, DA 0-6 def 4)"},
     {NULL},
 };
 
+// Defaults below are the module's own power-on values, read back from an
+// R3-E0200-S-V20 (0x8000:xx).  Keep them accurate: the driver only writes a
+// setting the user actually specified, so these strings are documentation, and
+// a wrong "default" here invites someone to copy it into their XML.  In
+// particular min/max really are the full int32 range -- the previous
+// +/-100000 would have silently wrapped the count after ~10 turns of a
+// 2500 PPR encoder in 4x mode.
 static const lcec_modparam_desc_t leadshine_ec_encoder_params[] = {
-    {"encoderMode", LEADSHINE_EC_MP_ENC_MODE, MODPARAM_TYPE_U32, "0", "Encoder operation mode"},
-    {"abPhase", LEADSHINE_EC_MP_ENC_ABPHASE, MODPARAM_TYPE_U32, "0", "AB phase configuration"},
-    {"minValue", LEADSHINE_EC_MP_ENC_MINVALUE, MODPARAM_TYPE_S32, "-100000", "Minimum encoder value"},
-    {"maxValue", LEADSHINE_EC_MP_ENC_MAXVALUE, MODPARAM_TYPE_S32, "100000", "Maximum encoder value"},
-    {"countMode", LEADSHINE_EC_MP_ENC_COUNTMODE, MODPARAM_TYPE_U32, "0", "Counting mode"},
+    {"encoderMode", LEADSHINE_EC_MP_ENC_MODE, MODPARAM_TYPE_U32, "0", "Encoder operation mode (0-4, see module manual)"},
+    {"abPhase", LEADSHINE_EC_MP_ENC_ABPHASE, MODPARAM_TYPE_U32, "0", "AB phase order; 1 swaps A/B to reverse count direction (0-1)"},
+    {"presetValue", LEADSHINE_EC_MP_ENC_SETVALUE, MODPARAM_TYPE_S32, "0", "Value loaded into the counter"},
+    {"minValue", LEADSHINE_EC_MP_ENC_MINVALUE, MODPARAM_TYPE_S32, "-2147483647", "Minimum counter value before wrap"},
+    {"maxValue", LEADSHINE_EC_MP_ENC_MAXVALUE, MODPARAM_TYPE_S32, "2147483646", "Maximum counter value before wrap"},
+    {"zPhaseClear", LEADSHINE_EC_MP_ENC_ZCLEAR, MODPARAM_TYPE_U32, "0", "1 = clear the counter on the Z/index pulse"},
+    {"countMode", LEADSHINE_EC_MP_ENC_COUNTMODE, MODPARAM_TYPE_U32, "0", "Counting mode (0-1, see module manual)"},
     {"encoderFilter", LEADSHINE_EC_MP_ENC_FILTER, MODPARAM_TYPE_U32, "2", "Encoder input filter"},
     {NULL},
 };

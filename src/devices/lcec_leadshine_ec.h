@@ -173,6 +173,7 @@ typedef struct {
   lcec_class_enc_data_t *enc;        // encoder channel array, or NULL
   unsigned int *enc_pos_os;          // per-encoder position PDO offset, or NULL
   unsigned int *enc_err_os;          // per-encoder error-byte PDO offset, or NULL
+  uint32_t *enc_cpr;                 // per-encoder counts/rev for index handling, or NULL
   hal_u32_t **enc_error;             // per-encoder error-byte pin, or NULL
 } leadshine_ec_slot_t;
 
@@ -198,6 +199,7 @@ typedef struct {
 #define LEADSHINE_EC_MP_ENC_FILTER     7
 #define LEADSHINE_EC_MP_ENC_SETVALUE   8
 #define LEADSHINE_EC_MP_ENC_ZCLEAR     9
+#define LEADSHINE_EC_MP_ENC_CPR(ch)    (10 + (ch))  // counts/rev, per channel
 
 static const lcec_modparam_desc_t leadshine_ec_digital_params[] = {
     {"safeState", LEADSHINE_EC_MP_SAFESTATE, MODPARAM_TYPE_U32, "0", "Output value when link is lost (0 = all off)"},
@@ -269,6 +271,13 @@ static const lcec_modparam_desc_t leadshine_ec_encoder_params[] = {
     {"zPhaseClear", LEADSHINE_EC_MP_ENC_ZCLEAR, MODPARAM_TYPE_U32, "0", "Z-phase pulse reset: 0=disabled, 1=enabled"},
     {"countMode", LEADSHINE_EC_MP_ENC_COUNTMODE, MODPARAM_TYPE_U32, "0", "0=ring (wraps at min/max), 1=linear"},
     {"encoderFilter", LEADSHINE_EC_MP_ENC_FILTER, MODPARAM_TYPE_U32, "2", "Input filter time, unit 100 ns (0-65535)"},
+    // Driver-side only; never written to the module.  class_enc needs counts
+    // per revolution to place the index: without it, index-ena degrades to a
+    // plain position reset instead of snapping to the Z boundary.  This is
+    // COUNTS, not encoder PPR -- in AB 4x mode (encoderMode=2) a 2500 PPR
+    // encoder gives 10000.  Per channel, since the two need not match.
+    {"ch0CountsPerRev", LEADSHINE_EC_MP_ENC_CPR(0), MODPARAM_TYPE_U32, NULL, "Channel 0 counts per revolution (PPR x mode multiplier)"},
+    {"ch1CountsPerRev", LEADSHINE_EC_MP_ENC_CPR(1), MODPARAM_TYPE_U32, NULL, "Channel 1 counts per revolution (PPR x mode multiplier)"},
     {NULL},
 };
 

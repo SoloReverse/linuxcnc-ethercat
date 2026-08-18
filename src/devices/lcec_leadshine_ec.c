@@ -323,6 +323,7 @@ static int leadshine_ec_register_enc(lcec_slave_t *slave, leadshine_ec_slot_t *s
   slot->enc = LCEC_HAL_ALLOCATE_ARRAY(lcec_class_enc_data_t, count);
   slot->enc_pos_os = LCEC_HAL_ALLOCATE_ARRAY(unsigned int, count);
   slot->enc_err_os = LCEC_HAL_ALLOCATE_ARRAY(unsigned int, count);
+  slot->enc_cpr = LCEC_HAL_ALLOCATE_ARRAY(uint32_t, count);
   slot->enc_error = LCEC_HAL_ALLOCATE_ARRAY(hal_u32_t *, count);
 
   for (int ch = 0; ch < count; ch++) {
@@ -611,6 +612,12 @@ static int lcec_leadshine_ec_init(int comp_id, lcec_slave_t *slave) {
         if ((err = leadshine_ec_register_enc(slave, slot, s->name, def->in)) != 0) {
           return err;
         }
+        // Counts/rev is consumed by class_enc, not the module, so it is read
+        // here rather than in leadshine_ec_apply_modparams().
+        for (int ch = 0; ch < def->in && ch < 2; ch++) {
+          LCEC_CONF_MODPARAM_VAL_T *cprv = lcec_submodule_modparam_get(s, LEADSHINE_EC_MP_ENC_CPR(ch));
+          slot->enc_cpr[ch] = (cprv != NULL) ? cprv->u32 : 0;
+        }
         break;
       default: break;
     }
@@ -649,7 +656,7 @@ static void lcec_leadshine_ec_read(lcec_slave_t *slave, long period) {
       lcec_ain_read_all(slave, slot->ain);
     }
     for (int ch = 0; ch < slot->enc_count; ch++) {
-      class_enc_update(&slot->enc[ch], 0, 1.0, EC_READ_U32(&pd[slot->enc_pos_os[ch]]), 0, 0);
+      class_enc_update(&slot->enc[ch], slot->enc_cpr[ch], 1.0, EC_READ_U32(&pd[slot->enc_pos_os[ch]]), 0, 0);
       *(slot->enc_error[ch]) = EC_READ_U8(&pd[slot->enc_err_os[ch]]);
     }
   }

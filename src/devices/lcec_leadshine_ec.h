@@ -58,6 +58,15 @@
 #include "lcec_class_enc.h"
 
 // CoE objects the coupler exposes.
+// The coupler's own device-status TxPDO.  The ESI declares it Sm="3" at device
+// level, ahead of every module PDO, so it is part of the default SM3 assignment
+// and belongs first in ours.  Its width differs by coupler: R2EC maps
+// 0xF100:01 as a single UDINT (4 bytes), R3EC carries 64 bits (8 bytes) -- some
+// R3EC revisions as one ULINT at 0xF100:01, others as 0xF100:01 + :02.  Both
+// R3EC shapes occupy the same 8 bytes, so mapping them as two UDINTs keeps the
+// process-image offsets right either way.
+#define LEADSHINE_EC_DEVSTATUS_PDO 0x1BFA  // coupler's own device-status TxPDO (Sm="3")
+#define LEADSHINE_EC_DEVSTATUS_OBJ 0xF100  // per-module status bitmap, 1 bit per slot
 #define LEADSHINE_EC_READMODULES 0xF050  // detected module ident list (read)
 #define LEADSHINE_EC_CONFMODULES 0xF030  // configured module ident list (written by us)
 #define LEADSHINE_EC_INOBJ       0x6000  // per-slot input object base
@@ -128,6 +137,8 @@
 #define LEADSHINE_EC_FLAG(max_slots, pdo_incr) (((uint64_t)(max_slots) & 0xff) | (((uint64_t)(pdo_incr) & 0xff) << 8))
 #define LEADSHINE_EC_MAX_SLOTS(f)              ((int)((f) & 0xff))
 #define LEADSHINE_EC_PDO_INCR(f)               ((int)(((f) >> 8) & 0xff))
+#define LEADSHINE_EC_PDO_INCR_R2EC 0x10  // R2EC TxPdo/RxPdo index stride per slot
+#define LEADSHINE_EC_PDO_INCR_R3EC 0x08  // R3EC TxPdo/RxPdo index stride per slot
 
 /// @brief Kind of module in a slot; selects the PDO shape and HAL class.
 typedef enum {

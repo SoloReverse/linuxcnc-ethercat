@@ -258,6 +258,16 @@ static void leadshine_ec_build_syncs(lcec_slave_t *slave, lcec_syncs_t *syncs, i
 
   // SM3: inputs (TxPDO)
   lcec_syncs_add_sync(syncs, EC_DIR_INPUT, EC_WD_DEFAULT);
+  // The coupler's own device-status PDO leads the SM3 assignment (see the
+  // LEADSHINE_EC_DEVSTATUS_* comment).  Leaving it out is not cosmetic: an
+  // R3EC then refuses the input read outright, parking the domain at
+  // WorkingCounter 2/3 -- the write half answered, the read half not -- so
+  // every input byte reads 0 and no module ever produces data.
+  lcec_syncs_add_pdo_info(syncs, LEADSHINE_EC_DEVSTATUS_PDO);
+  lcec_syncs_add_pdo_entry(syncs, LEADSHINE_EC_DEVSTATUS_OBJ, 1, 32);
+  if (pdo_incr == LEADSHINE_EC_PDO_INCR_R3EC) {
+    lcec_syncs_add_pdo_entry(syncs, LEADSHINE_EC_DEVSTATUS_OBJ, 2, 32);
+  }
   for (lcec_slave_submodule_t *s = slave->submodules; s != NULL; s = s->next) {
     const leadshine_ec_module_def_t *def = leadshine_ec_find_module(s->ident);
     if (def != NULL) {

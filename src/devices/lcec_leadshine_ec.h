@@ -200,6 +200,16 @@ typedef struct {
 #define LEADSHINE_EC_MP_ENC_SETVALUE   8
 #define LEADSHINE_EC_MP_ENC_ZCLEAR     9
 #define LEADSHINE_EC_MP_ENC_CPR(ch)    (10 + (ch))  // counts/rev, per channel
+#define LEADSHINE_EC_MP_ENC_INMODE(ch)  (20 + (ch))  // IN0..IN3 port function
+#define LEADSHINE_EC_MP_ENC_OUTMODE(ch) (24 + (ch))  // OUT0..OUT3 port function
+
+// Port-function objects live at fixed offsets inside the slot's config window,
+// two ports per object: inputs at <cfg>+7 and <cfg>+8 (subindex 1 and 7),
+// outputs at <cfg>+11 and <cfg>+12 (subindex 1 and 5).
+#define LEADSHINE_EC_ENC_INMODE_OBJ(ch)  (7 + ((ch) >> 1))
+#define LEADSHINE_EC_ENC_INMODE_SUB(ch)  (((ch) & 1) ? 7 : 1)
+#define LEADSHINE_EC_ENC_OUTMODE_OBJ(ch) (11 + ((ch) >> 1))
+#define LEADSHINE_EC_ENC_OUTMODE_SUB(ch) (((ch) & 1) ? 5 : 1)
 
 static const lcec_modparam_desc_t leadshine_ec_digital_params[] = {
     {"safeState", LEADSHINE_EC_MP_SAFESTATE, MODPARAM_TYPE_U32, "0", "Output value when link is lost (0 = all off)"},
@@ -278,6 +288,20 @@ static const lcec_modparam_desc_t leadshine_ec_encoder_params[] = {
     // encoder gives 10000.  Per channel, since the two need not match.
     {"ch0CountsPerRev", LEADSHINE_EC_MP_ENC_CPR(0), MODPARAM_TYPE_U32, NULL, "Channel 0 counts per revolution (PPR x mode multiplier)"},
     {"ch1CountsPerRev", LEADSHINE_EC_MP_ENC_CPR(1), MODPARAM_TYPE_U32, NULL, "Channel 1 counts per revolution (PPR x mode multiplier)"},
+    // The module's own IN0..IN3 / OUT0..OUT3 do NOT default to plain digital
+    // I/O, so the din/dout pins the driver exports are inert until these are
+    // set.  Inputs default to 2 (latch) on IN0/IN2 and 0 on IN1/IN3; outputs
+    // default to comparator-driven, and with the comparators disabled that
+    // means an output pin that is silently ignored.  Set outNmode=0 to make
+    // OUTn follow its HAL pin, and inNmode=0 to make INn a readable input.
+    {"in0Mode", LEADSHINE_EC_MP_ENC_INMODE(0), MODPARAM_TYPE_U32, NULL, "IN0: 0=input, 1=preset, 2=latch (default), 3=clear counter"},
+    {"in1Mode", LEADSHINE_EC_MP_ENC_INMODE(1), MODPARAM_TYPE_U32, NULL, "IN1: 0=input (default), 1=preset, 2=latch, 3=clear counter"},
+    {"in2Mode", LEADSHINE_EC_MP_ENC_INMODE(2), MODPARAM_TYPE_U32, NULL, "IN2: 0=input, 1=preset, 2=latch (default), 3=clear counter"},
+    {"in3Mode", LEADSHINE_EC_MP_ENC_INMODE(3), MODPARAM_TYPE_U32, NULL, "IN3: 0=input (default), 1=preset, 2=latch, 3=clear counter"},
+    {"out0Mode", LEADSHINE_EC_MP_ENC_OUTMODE(0), MODPARAM_TYPE_U32, NULL, "OUT0: 0=normal (HAL pin), 1=PWM, 2=cmp0 (default), 3=cmp1"},
+    {"out1Mode", LEADSHINE_EC_MP_ENC_OUTMODE(1), MODPARAM_TYPE_U32, NULL, "OUT1: 0=normal (HAL pin), 1=PWM, 2=cmp0, 3=cmp1 (default)"},
+    {"out2Mode", LEADSHINE_EC_MP_ENC_OUTMODE(2), MODPARAM_TYPE_U32, NULL, "OUT2: 0=normal (HAL pin), 1=PWM, 2=cmp0 (default), 3=cmp1"},
+    {"out3Mode", LEADSHINE_EC_MP_ENC_OUTMODE(3), MODPARAM_TYPE_U32, NULL, "OUT3: 0=normal (HAL pin), 1=PWM, 2=cmp0, 3=cmp1 (default)"},
     {NULL},
 };
 

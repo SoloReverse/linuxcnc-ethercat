@@ -461,6 +461,24 @@ static int leadshine_ec_apply_modparams(lcec_slave_t *slave, lcec_slave_submodul
           (err = lcec_write_sdo16(slave, eobj, LEADSHINE_EC_SUB_ENC_FILTER, v->u32 & 0xffff)) != 0) {
         return err;
       }
+      // Port functions: only meaningful once per module, not per channel, so
+      // they are applied on the first pass.
+      if (ch == 0) {
+        for (int p = 0; p < LEADSHINE_EC_ENC_DIN; p++) {
+          if ((v = lcec_submodule_modparam_get(sub, LEADSHINE_EC_MP_ENC_INMODE(p))) != NULL &&
+              (err = lcec_write_sdo8(slave, cfg + LEADSHINE_EC_ENC_INMODE_OBJ(p), LEADSHINE_EC_ENC_INMODE_SUB(p), v->u32 & 0xff)) != 0) {
+            return err;
+          }
+        }
+        for (int p = 0; p < LEADSHINE_EC_ENC_DOUT; p++) {
+          if ((v = lcec_submodule_modparam_get(sub, LEADSHINE_EC_MP_ENC_OUTMODE(p))) != NULL &&
+              (err = lcec_write_sdo8(slave, cfg + LEADSHINE_EC_ENC_OUTMODE_OBJ(p), LEADSHINE_EC_ENC_OUTMODE_SUB(p), v->u32 & 0xff)) !=
+                  0) {
+            return err;
+          }
+        }
+      }
+
       // Written last: loading the counter only makes sense once the limits it
       // has to fall inside have been applied.
       if ((v = lcec_submodule_modparam_get(sub, LEADSHINE_EC_MP_ENC_SETVALUE)) != NULL &&

@@ -475,13 +475,21 @@ static int leadshine_ec_apply_modparams(lcec_slave_t *slave, lcec_slave_submodul
 /// @brief Write the configured module ident list (0xF030) so the coupler
 /// accepts the PDO mapping.  Per the ESI, sub 0 is a USINT count and subs 1..N
 /// are one UDINT (32-bit) module ident each (slot id + 1).
-static void leadshine_ec_write_module_list(lcec_slave_t *slave) {
+///
+/// Failure here is fatal, not a warning: until this list is accepted the
+/// coupler exposes none of the per-slot objects, so every later step --
+/// modparams, PDO assignment -- fails with abort 0x08000000 "object does not
+/// exist".  Reporting that as a warning and continuing turns one clear error
+/// into a confusing cascade that points at the wrong object.
+static int leadshine_ec_write_module_list(lcec_slave_t *slave) {
   int count = 0;
 
   for (lcec_slave_submodule_t *s = slave->submodules; s != NULL; s = s->next) {
     if (lcec_write_sdo32(slave, LEADSHINE_EC_CONFMODULES, s->id + 1, s->ident) != 0) {
-      rtapi_print_msg(RTAPI_MSG_WARN, LCEC_MSG_PFX "%s.%s: failed writing module ident 0x%08x to 0x%04x:%02x\n", slave->master->name,
-          slave->name, s->ident, LEADSHINE_EC_CONFMODULES, s->id + 1);
+      rtapi_print_msg(RTAPI_MSG_ERR,
+          LCEC_MSG_PFX "%s.%s: failed writing module ident 0x%08x to 0x%04x:%02x; the coupler will not expose its per-slot objects\n",
+          slave->master->name, slave->name, s->ident, LEADSHINE_EC_CONFMODULES, s->id + 1);
+      return -1;
     }
     if (s->id + 1 > count) {
       count = s->id + 1;
@@ -489,9 +497,12 @@ static void leadshine_ec_write_module_list(lcec_slave_t *slave) {
   }
 
   if (lcec_write_sdo8(slave, LEADSHINE_EC_CONFMODULES, 0x00, count) != 0) {
-    rtapi_print_msg(RTAPI_MSG_WARN, LCEC_MSG_PFX "%s.%s: failed writing module count to 0x%04x:00\n", slave->master->name, slave->name,
-        LEADSHINE_EC_CONFMODULES);
+    rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "%s.%s: failed writing module count %d to 0x%04x:00\n", slave->master->name, slave->name,
+        count, LEADSHINE_EC_CONFMODULES);
+    return -1;
   }
+
+  return 0;
 }
 
 /// @brief Explicitly write the SM2/SM3 PDO assignment objects (0x1C12/0x1C13).
@@ -561,7 +572,9 @@ static int lcec_leadshine_ec_init(int comp_id, lcec_slave_t *slave) {
   // whole init.  Verified against an R3EC with a
   // DO/DIO/A0004-IV/E0200-S stack: the per-slot objects appear only once the
   // module ident list has been accepted.
-  leadshine_ec_write_module_list(slave);
+  if ((err = leadshine_ec_write_module_list(slave)) != 0) {
+    return err;
+  }
 
   // Register HAL pins + PDO entries and apply modparams, one slot at a time.
   int i = 0;

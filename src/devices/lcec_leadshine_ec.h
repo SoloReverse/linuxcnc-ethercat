@@ -87,6 +87,14 @@
 #define LEADSHINE_EC_SUB_SAFESTATE_LO 1  // DO/relay: output state on link loss, bits 0-15  (UINT16)
 #define LEADSHINE_EC_SUB_SAFESTATE_HI 2  // DO 32-ch: output state on link loss, bits 16-31 (UINT16)
 #define LEADSHINE_EC_SUB_FILTER_BASE  3  // DI: input filter, subindices 3..6 per 8-channel group (UINT16)
+// Analog full scale.  The class default is 0x7fff, but these modules are
+// specified +/-32000 (manual 6.6 / 6.7.1: the DA link-loss preset takes
+// -32000..32000).  Leaving the default would make a HAL value of 1.0 command
+// ~2.4% past the module's rated full scale -- on the +/-10V range, 10.24V
+// instead of 10.00V, which is a real scaling error for an analog velocity
+// reference.
+#define LEADSHINE_EC_ANALOG_FULLSCALE 32000
+
 #define LEADSHINE_EC_SUB_ANALOG_BASE  1  // AIN/AOUT: per-channel range/mode config, sub 1..4 (USINT8)
 
 // DA-only objects, offsets within the slot's 0x10-wide config window:

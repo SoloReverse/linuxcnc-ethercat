@@ -297,6 +297,7 @@ static void leadshine_ec_register_ain(lcec_slave_t *slave, leadshine_ec_slot_t *
     opt->name_prefix = prefix;
     opt->valueonly = 1;        // diagnostics are mapped but not exposed as pins
     opt->value_sidx = ch + 1;  // 0x6000:1..N, INT16 (ESI)
+    opt->max_value = LEADSHINE_EC_ANALOG_FULLSCALE;
     slot->ain->channels[ch] = lcec_ain_register_channel(slave, ch, obj, opt);
   }
 }
@@ -309,6 +310,7 @@ static void leadshine_ec_register_aout(lcec_slave_t *slave, leadshine_ec_slot_t 
     lcec_class_aout_options_t *opt = lcec_aout_options();
     opt->name_prefix = prefix;
     opt->value_sidx = ch + 1;  // 0x7000:1..N, INT16 (ESI)
+    opt->max_value = LEADSHINE_EC_ANALOG_FULLSCALE;
     slot->aout->channels[ch] = lcec_aout_register_channel(slave, ch, obj, opt);
   }
 }
